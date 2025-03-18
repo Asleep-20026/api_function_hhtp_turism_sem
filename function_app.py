@@ -26,16 +26,16 @@ encoded_password = urllib.parse.quote_plus(password)
 DB_URL = f"mssql+pyodbc://{username}:{encoded_password}@{server}/{database}?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=no&Connection Timeout=30"
 
 # Crear motor con SQLAlchemy
-engine = create_engine(DB_URL, echo=True)  # echo=True para ver las consultas SQL generadas en logs
+engine = create_engine(DB_URL, echo=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # Función para obtener una sesión de base de datos
 def get_db():
     db = SessionLocal()
     try:
-        yield db  # Retorna la sesión de SQLAlchemy
+        yield db  
     finally:
-        db.close()  # Cierra la sesión después de usarla
+        db.close() 
         
 # Función auxiliar para convertir filas a diccionarios
 def rows_to_dict_list(cursor, rows):
@@ -109,24 +109,23 @@ def get_user_by_id(req: func.HttpRequest) -> func.HttpResponse:
         # Obtener el ID de la ruta
         id = int(req.route_params.get('id'))
         
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM Users WHERE id = ?", (id,))
-        user = cursor.fetchone()
+        db: Session = SessionLocal()
+        user = db.query(User).filter(User.id == id).first()
+        
         if user:
-            user_dict = dict(zip([column[0] for column in cursor.description], user))
-            conn.close()
-            return func.HttpResponse(json.dumps(user_dict, default=str), mimetype="application/json")
+            return func.HttpResponse(json.dumps(user.to_dict(), default=str), mimetype="application/json")
         else:
-            conn.close()
             return func.HttpResponse("User not found", status_code=404)
     except Exception as e:
         logging.error(str(e))
         return func.HttpResponse(f"Error: {str(e)}", status_code=500)
+    finally:
+        db.close()
 
 @app.route(route="users", methods=["POST"])
 def create_user(req: func.HttpRequest) -> func.HttpResponse:
     logging.info("Creating a new user.")
+    db: Session = SessionLocal()
     try:
         req_body = req.get_json()
         name = req_body.get("name")
@@ -134,16 +133,32 @@ def create_user(req: func.HttpRequest) -> func.HttpResponse:
         password_hash = req_body.get("password_hash")
         phone = req_body.get("phone")
         
-        db = SessionLocal()  # Crear sesión de SQLAlchemy
+        # Check if email already exists
+        existing_user = db.query(User).filter(User.email == email).first()
+        if existing_user:
+            return func.HttpResponse(
+                json.dumps({"error": "User with this email already exists"}),
+                status_code=409,  # Conflict status code
+                mimetype="application/json"
+            )
         
-        # Ejecutar consulta con SQLAlchemy
-        query = text("INSERT INTO dbo.Users (name, email, password_hash, phone) OUTPUT INSERTED.id VALUES (:name, :email, :password_hash, :phone)")
-        result = db.execute(query, {"name": name, "email": email, "password_hash": password_hash, "phone": phone})
+        # Create new user with SQLAlchemy
+        new_user = User(
+            name=name,
+            email=email,
+            password_hash=password_hash,
+            phone=phone
+        )
         
+        db.add(new_user)
         db.commit()
-        user_id = result.fetchone()[0]  # Obtener el ID insertado
+        db.refresh(new_user)
         
-        return func.HttpResponse(json.dumps({"id": user_id}), status_code=201, mimetype="application/json")
+        return func.HttpResponse(
+            json.dumps({"id": new_user.id, "status": "succes"}, default=str),
+            status_code=201,
+            mimetype="application/json"
+        )
     
     except Exception as e:
         db.rollback()
@@ -151,58 +166,92 @@ def create_user(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse(f"Error: {str(e)}", status_code=500)
     
     finally:
-        db.close()  # Cerrar la sesión correctamente
+        db.close()
     
-@app.route(route="users/{id}", methods=["PUT"])
+@app.route(route="users/update", methods=["PUT"])
 def update_user(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info("Updating user")
+    db: Session = SessionLocal()
+    
     try:
-        # Obtener el ID de la ruta
-        id = int(req.route_params.get('id'))
-        
+        # Obtener datos de la solicitud
         req_body = req.get_json()
+        id = req_body.get("id")  # Obtener el ID desde el cuerpo
         name = req_body.get("name")
         email = req_body.get("email")
         password_hash = req_body.get("password_hash")
         phone = req_body.get("phone")
         
-        logging.info(f"Updating user with ID: {id}")
+        if not id:
+            return func.HttpResponse(
+                json.dumps({"error": "ID is required"}), 
+                status_code=400, 
+                mimetype="application/json"
+            )
+
+        # Buscar usuario con SQLAlchemy
+        user = db.query(User).filter(User.id == id).first()
         
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("UPDATE Users SET name = ?, email = ?, password_hash = ?, phone = ? WHERE id = ?",
-                      (name, email, password_hash, phone, id))
-        conn.commit()
+        if not user:
+            return func.HttpResponse(
+                json.dumps({"error": "User not found"}), 
+                status_code=404, 
+                mimetype="application/json"
+            )
         
-        if cursor.rowcount == 0:
-            conn.close()
-            return func.HttpResponse("User not found", status_code=404)
+        # Actualizar los campos si existen en la solicitud
+        if name:
+            user.name = name
+        if email:
+            user.email = email
+        if password_hash:
+            user.password_hash = password_hash
+        if phone:
+            user.phone = phone
         
-        conn.close()
-        return func.HttpResponse("User updated successfully", status_code=200)
+        db.commit()
+        
+        return func.HttpResponse(
+            json.dumps({"message": "User updated successfully"}), 
+            status_code=200, 
+            mimetype="application/json"
+        )
+    
     except Exception as e:
+        db.rollback()
         logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
+        return func.HttpResponse(
+            json.dumps({"error": str(e)}), 
+            status_code=500, 
+            mimetype="application/json"
+        )
+    
+    finally:
+        db.close()
 
 @app.route(route="users/{id}", methods=["DELETE"])
 def delete_user(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info("Deleting user")
+    db: Session = SessionLocal()
     try:
         id = int(req.route_params.get('id'))
-        logging.info(f"Deleting user with ID: {id}")
         
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM Users WHERE id = ?", (id,))
-        conn.commit()
+        # Buscar y eliminar usuario con SQLAlchemy
+        user = db.query(User).filter(User.id == id).first()
         
-        if cursor.rowcount == 0:
-            conn.close()
+        if not user:
             return func.HttpResponse("User not found", status_code=404)
         
-        conn.close()
+        db.delete(user)
+        db.commit()
+        
         return func.HttpResponse("User deleted successfully", status_code=200)
     except Exception as e:
+        db.rollback()
         logging.error(str(e))
         return func.HttpResponse(f"Error: {str(e)}", status_code=500)
+    finally:
+        db.close()
 
 ###############################################
 # CRUD para la tabla Destinations
