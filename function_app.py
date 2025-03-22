@@ -17,7 +17,7 @@ from src.models.user import User
 server = os.getenv("SQL_SERVER", "server-android.database.windows.net")
 database = os.getenv("SQL_DATABASE", "turismo")
 username = os.getenv("SQL_USERNAME", "sqlserver")
-password = os.getenv("SQL_PASSWORD", "@sql123456")  # Valor por defecto no recomendado en producción
+password = os.getenv("SQL_PASSWORD", "@sql123456")
 
 # Codificar la contraseña para la URL
 encoded_password = urllib.parse.quote_plus(password)
