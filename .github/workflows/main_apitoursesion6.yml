@@ -1,7 +1,7 @@
 # Docs for the Azure Web Apps Deploy action: https://github.com/azure/functions-action
 # More GitHub Actions for Azure: https://github.com/Azure/actions
 # More info on Python, GitHub Actions, and Azure Functions: https://aka.ms/python-webapps-actions
-# Modificado
+
 name: Build and deploy Python project to Azure Function App - apiTourSesion6
 
 on:
@@ -72,7 +72,6 @@ jobs:
           client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_72970E544C9F4AA88EA6B9BDA7AC8E69 }}
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_FA17A752D5504A0CBD25B2C3872BE8DD }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_0B2FEDBD40B448D4B4E2CAB89E975302 }}
-          allow-no-suscriptions: true
 
       - name: 'Deploy to Azure Functions'
         uses: Azure/functions-action@v1
