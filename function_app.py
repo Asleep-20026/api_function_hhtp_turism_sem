@@ -14,11 +14,10 @@ from sqlalchemy.sql import text
 from src.models.user import User
 
 # Configuración de la conexión a Azure SQL Database desde variables de entorno
-server = os.getenv("SQL_SERVER", "server-android.database.windows.net")
-database = os.getenv("SQL_DATABASE", "turismo")
-username = os.getenv("SQL_USERNAME", "sqlserver")
-password = os.getenv("SQL_PASSWORD", "@sql123456")
-
+server = os.getenv("SQL_SERVER", "sem6.database.windows.net")
+database = os.getenv("SQL_DATABASE", "db_tourismo")
+username = os.getenv("SQL_USERNAME", "admin2025")
+password = os.getenv("SQL_PASSWORD", "seminario_sesion6_2025")
 # Codificar la contraseña para la URL
 encoded_password = urllib.parse.quote_plus(password)
 
