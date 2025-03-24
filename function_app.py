@@ -1,1172 +1,786 @@
 import azure.functions as func
 import logging
 import json
-import pyodbc
 import os
-from sqlalchemy.ext.declarative import declarative_base
-app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
-
 import urllib.parse
-from sqlalchemy import create_engine, Column, Integer, String
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.orm import Session
-from sqlalchemy.sql import text
-from src.models.user import User
+from typing import List, Dict, Any
 
-# Configuración de la conexión a Azure SQL Database desde variables de entorno
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, relationship
+from sqlalchemy.exc import SQLAlchemyError
+
+from src.models.usuario import Usuario
+from src.models.destino import Destino
+from src.models.ciudad import Ciudad
+from src.models.guia import Guia
+from src.models.reserva import Reserva
+from src.models.reserva_usuario import ReservaUsuario
+from src.models.reserva_guia import ReservaGuia
+from src.models.genero import Genero
+from src.models.guia_calificacion import GuiaCalificacion
+from src.models.destino_calificacion import DestinoCalificacion
+from src.models.pais import Pais
+from src.models.cliente import Cliente
+from src.models.idioma import Idioma
+from src.models.guia_idioma import GuiaIdioma
+from datetime import datetime
+
+# Database Connection Configuration
 server = os.getenv("SQL_SERVER", "sem6.database.windows.net")
 database = os.getenv("SQL_DATABASE", "db_tourismo")
 username = os.getenv("SQL_USERNAME", "admin2025")
 password = os.getenv("SQL_PASSWORD", "seminario_sesion6_2025")
-# Codificar la contraseña para la URL
 encoded_password = urllib.parse.quote_plus(password)
 
-# URL de conexión para SQLAlchemy con formato específico para Azure SQL
 DB_URL = f"mssql+pyodbc://{username}:{encoded_password}@{server}/{database}?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=no&Connection Timeout=30"
 
-# Crear motor con SQLAlchemy
+# Create engine and session
 engine = create_engine(DB_URL, echo=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# Función para obtener una sesión de base de datos
-def get_db():
-    db = SessionLocal()
+# Helper function to convert SQLAlchemy objects to dictionaries
+def to_dict(obj):
+    return {c.name: getattr(obj, c.name) for c in obj.__table__.columns}
+
+# Azure Function App
+app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
+
+# Usuario Endpoints
+@app.route(route="usuarios", methods=["GET", "POST"])
+def manage_usuarios(req: func.HttpRequest) -> func.HttpResponse:
     try:
-        yield db  
-    finally:
-        db.close() 
+        session = SessionLocal()
         
-# Función auxiliar para convertir filas a diccionarios
-def rows_to_dict_list(cursor, rows):
-    return [dict(zip([column[0] for column in cursor.description], row)) for row in rows]
-
-
-###############################################
-# CRUD para la tabla Users
-###############################################
-
-@app.route(route="test-db", methods=["GET"])
-def test_db(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        db = SessionLocal()
-        result = db.execute(text("SELECT DB_NAME()")).fetchone()
-        db.close()
-        return func.HttpResponse(json.dumps({"connected_to": result[0]}), mimetype="application/json", status_code=200)
-    except Exception as e:
-        return func.HttpResponse(json.dumps({"error": str(e)}), mimetype="application/json", status_code=500)
-
-@app.route(route="get-tables", methods=["GET"])
-def get_tables(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        db = SessionLocal()
-        result = db.execute(text("""
-            SELECT TABLE_SCHEMA + '.' + TABLE_NAME AS full_table_name 
-            FROM INFORMATION_SCHEMA.TABLES 
-            WHERE TABLE_TYPE = 'BASE TABLE'
-        """)).fetchall()
-        db.close()
-        
-        # Convertir resultado a JSON
-        tables = [{"table_name": row[0]} for row in result]
-        return func.HttpResponse(json.dumps(tables), mimetype="application/json", status_code=200)
-
-    except Exception as e:
-        return func.HttpResponse(json.dumps({"error": str(e)}), mimetype="application/json", status_code=500)
-
-@app.route(route="users", methods=["GET"])
-def get_users(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("Fetching users from database.")
-    
-    try:
-        db: Session = SessionLocal()
-        
-        # Verifica si la tabla existe
-        result = db.execute(text("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'Users'"))
-        print(result)
-        print("iniciando debug")
-        table_exists = result.fetchall()
-        print(table_exists)
-        if not table_exists:
-            return func.HttpResponse("Table 'users' does not exist in the database.", status_code=404)
-        
-        # Si la tabla existe, intenta consultar la tabla con el esquema correcto
-        users = db.query(User).all()
-        db.close()
-        
-        users_list = [user.to_dict() for user in users]
-        
-        return func.HttpResponse(json.dumps(users_list, default=str), mimetype="application/json")
-    
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="users/{id}", methods=["GET"])
-def get_user_by_id(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("Fetching user by ID")
-    try:
-        # Obtener el ID de la ruta
-        id = int(req.route_params.get('id'))
-        
-        db: Session = SessionLocal()
-        user = db.query(User).filter(User.id == id).first()
-        
-        if user:
-            return func.HttpResponse(json.dumps(user.to_dict(), default=str), mimetype="application/json")
-        else:
-            return func.HttpResponse("User not found", status_code=404)
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-    finally:
-        db.close()
-
-@app.route(route="users", methods=["POST"])
-def create_user(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("Creating a new user.")
-    db: Session = SessionLocal()
-    try:
-        req_body = req.get_json()
-        name = req_body.get("name")
-        email = req_body.get("email")
-        password_hash = req_body.get("password_hash")
-        phone = req_body.get("phone")
-        
-        # Check if email already exists
-        existing_user = db.query(User).filter(User.email == email).first()
-        if existing_user:
+        if req.method == "GET":
+            usuarios = session.query(Usuario).all()
             return func.HttpResponse(
-                json.dumps({"error": "User with this email already exists"}),
-                status_code=409,  # Conflict status code
+                json.dumps([to_dict(usuario) for usuario in usuarios]),
                 mimetype="application/json"
             )
         
-        # Create new user with SQLAlchemy
-        new_user = User(
-            name=name,
-            email=email,
-            password_hash=password_hash,
-            phone=phone
-        )
-        
-        db.add(new_user)
-        db.commit()
-        db.refresh(new_user)
-        
-        return func.HttpResponse(
-            json.dumps({"id": new_user.id, "status": "succes"}, default=str),
-            status_code=201,
-            mimetype="application/json"
-        )
-    
-    except Exception as e:
-        db.rollback()
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-    
-    finally:
-        db.close()
-    
-@app.route(route="users/update", methods=["PUT"])
-def update_user(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("Updating user")
-    db: Session = SessionLocal()
-    
-    try:
-        # Obtener datos de la solicitud
-        req_body = req.get_json()
-        id = req_body.get("id")  # Obtener el ID desde el cuerpo
-        name = req_body.get("name")
-        email = req_body.get("email")
-        password_hash = req_body.get("password_hash")
-        phone = req_body.get("phone")
-        
-        if not id:
+        elif req.method == "POST":
+            usuario_data = req.get_json()
+            nuevo_usuario = Usuario(**usuario_data)
+            session.add(nuevo_usuario)
+            session.commit()
             return func.HttpResponse(
-                json.dumps({"error": "ID is required"}), 
-                status_code=400, 
+                json.dumps(to_dict(nuevo_usuario)), 
+                mimetype="application/json", 
+                status_code=201
+            )
+    
+    except SQLAlchemyError as e:
+        logging.error(f"Error de base de datos: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": "Error de base de datos"}), 
+            mimetype="application/json", 
+            status_code=500
+        )
+    finally:
+        session.close()
+
+@app.route(route="usuarios/{usuario_id}", methods=["GET", "PUT", "DELETE"])
+def manage_usuario_by_id(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        session = SessionLocal()
+        usuario_id = int(req.route_params.get('usuario_id'))
+        
+        if req.method == "GET":
+            usuario = session.query(Usuario).filter(Usuario.id == usuario_id).first()
+            if usuario:
+                return func.HttpResponse(
+                    json.dumps(to_dict(usuario)),
+                    mimetype="application/json"
+                )
+            return func.HttpResponse("Usuario no encontrado", status_code=404)
+        
+        elif req.method == "PUT":
+            usuario = session.query(Usuario).filter(Usuario.id == usuario_id).first()
+            if usuario:
+                usuario_data = req.get_json()
+                for key, value in usuario_data.items():
+                    setattr(usuario, key, value)
+                session.commit()
+                return func.HttpResponse(
+                    json.dumps(to_dict(usuario)), 
+                    mimetype="application/json"
+                )
+            return func.HttpResponse("Usuario no encontrado", status_code=404)
+        
+        elif req.method == "DELETE":
+            usuario = session.query(Usuario).filter(Usuario.id == usuario_id).first()
+            if usuario:
+                session.delete(usuario)
+                session.commit()
+                return func.HttpResponse("Usuario eliminado", status_code=204)
+            return func.HttpResponse("Usuario no encontrado", status_code=404)
+    
+    except SQLAlchemyError as e:
+        logging.error(f"Error de base de datos: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": "Error de base de datos"}), 
+            mimetype="application/json", 
+            status_code=500
+        )
+    finally:
+        session.close()
+
+# Destino Endpoints
+@app.route(route="destinos", methods=["GET", "POST"])
+def manage_destinos(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        session = SessionLocal()
+        
+        if req.method == "GET":
+            destinos = session.query(Destino).all()
+            return func.HttpResponse(
+                json.dumps([to_dict(destino) for destino in destinos]),
                 mimetype="application/json"
             )
-
-        # Buscar usuario con SQLAlchemy
-        user = db.query(User).filter(User.id == id).first()
         
-        if not user:
+        elif req.method == "POST":
+            destino_data = req.get_json()
+            nuevo_destino = Destino(**destino_data)
+            session.add(nuevo_destino)
+            session.commit()
             return func.HttpResponse(
-                json.dumps({"error": "User not found"}), 
-                status_code=404, 
+                json.dumps(to_dict(nuevo_destino)), 
+                mimetype="application/json", 
+                status_code=201
+            )
+    
+    except SQLAlchemyError as e:
+        logging.error(f"Error de base de datos: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": "Error de base de datos"}), 
+            mimetype="application/json", 
+            status_code=500
+        )
+    finally:
+        session.close()
+
+@app.route(route="destinos/{destino_id}", methods=["GET", "PUT", "DELETE"])
+def manage_destino_by_id(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        session = SessionLocal()
+        destino_id = int(req.route_params.get('destino_id'))
+        
+        if req.method == "GET":
+            destino = session.query(Destino).filter(Destino.id == destino_id).first()
+            if destino:
+                return func.HttpResponse(
+                    json.dumps(to_dict(destino)),
+                    mimetype="application/json"
+                )
+            return func.HttpResponse("Destino no encontrado", status_code=404)
+        
+        elif req.method == "PUT":
+            destino = session.query(Destino).filter(Destino.id == destino_id).first()
+            if destino:
+                destino_data = req.get_json()
+                for key, value in destino_data.items():
+                    setattr(destino, key, value)
+                session.commit()
+                return func.HttpResponse(
+                    json.dumps(to_dict(destino)), 
+                    mimetype="application/json"
+                )
+            return func.HttpResponse("Destino no encontrado", status_code=404)
+        
+        elif req.method == "DELETE":
+            destino = session.query(Destino).filter(Destino.id == destino_id).first()
+            if destino:
+                session.delete(destino)
+                session.commit()
+                return func.HttpResponse(
+                    json.dumps({"message": "Destino eliminado exitosamente"}), 
+                    mimetype="application/json", 
+                    status_code=200
+                )
+            return func.HttpResponse("Destino no encontrado", status_code=404)
+
+    
+    except SQLAlchemyError as e:
+        logging.error(f"Error de base de datos: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": "Error de base de datos"}), 
+            mimetype="application/json", 
+            status_code=500
+        )
+    finally:
+        session.close()
+
+# Reserva Endpoints
+def to_dict(obj):
+    """
+    Convierte un objeto SQLAlchemy a un diccionario, 
+    manejando conversión de fechas, relaciones y objetos datetime
+    """
+    from datetime import datetime
+    
+    # Si el objeto es None, devuelve None
+    if obj is None:
+        return None
+    
+    # Convierte el objeto a un diccionario
+    dict_obj = {c.name: getattr(obj, c.name) for c in obj.__table__.columns}
+    
+    # Convierte datetime a string ISO format
+    for key, value in list(dict_obj.items()):
+        if isinstance(value, datetime):
+            dict_obj[key] = value.isoformat()
+        # Convierte objetos None a null
+        elif value is None:
+            dict_obj[key] = None
+    
+    return dict_obj
+
+@app.route(route="reservas", methods=["GET", "POST"])
+def manage_reservas(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        session = SessionLocal()
+        
+        if req.method == "GET":
+            reservas = session.query(Reserva).all()
+            return func.HttpResponse(
+                json.dumps([to_dict(reserva) for reserva in reservas]),
                 mimetype="application/json"
             )
         
-        # Actualizar los campos si existen en la solicitud
-        if name:
-            user.name = name
-        if email:
-            user.email = email
-        if password_hash:
-            user.password_hash = password_hash
-        if phone:
-            user.phone = phone
-        
-        db.commit()
-        
-        return func.HttpResponse(
-            json.dumps({"message": "User updated successfully"}), 
-            status_code=200, 
-            mimetype="application/json"
-        )
-    
-    except Exception as e:
-        db.rollback()
-        logging.error(str(e))
-        return func.HttpResponse(
-            json.dumps({"error": str(e)}), 
-            status_code=500, 
-            mimetype="application/json"
-        )
-    
-    finally:
-        db.close()
-
-@app.route(route="users/{id}", methods=["DELETE"])
-def delete_user(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("Deleting user")
-    db: Session = SessionLocal()
-    try:
-        id = int(req.route_params.get('id'))
-        
-        # Buscar y eliminar usuario con SQLAlchemy
-        user = db.query(User).filter(User.id == id).first()
-        
-        if not user:
-            return func.HttpResponse("User not found", status_code=404)
-        
-        db.delete(user)
-        db.commit()
-        
-        return func.HttpResponse("User deleted successfully", status_code=200)
-    except Exception as e:
-        db.rollback()
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-    finally:
-        db.close()
-
-###############################################
-# CRUD para la tabla Destinations
-###############################################
-
-@app.route(route="destinations", methods=["GET"])
-def get_destinations(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("Fetching destinations from database.")
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM Destinations")
-        destinations = rows_to_dict_list(cursor, cursor.fetchall())
-        conn.close()
-        return func.HttpResponse(json.dumps(destinations, default=str), mimetype="application/json")
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="destinations/{id}", methods=["GET"])
-def get_destination_by_id(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        id = int(req.route_params.get('id'))
-        logging.info(f"Fetching destination with ID: {id}")
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM Destinations WHERE id = ?", (id,))
-        destination = cursor.fetchone()
-        if destination:
-            destination_dict = dict(zip([column[0] for column in cursor.description], destination))
-            conn.close()
-            return func.HttpResponse(json.dumps(destination_dict, default=str), mimetype="application/json")
-        else:
-            conn.close()
-            return func.HttpResponse("Destination not found", status_code=404)
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="destinations", methods=["POST"])
-def create_destination(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("Creating a new destination.")
-    try:
-        req_body = req.get_json()
-        name = req_body.get("name")
-        country = req_body.get("country")
-        city = req_body.get("city")
-        description = req_body.get("description")
-        image_url = req_body.get("image_url")
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO Destinations (name, country, city, description, image_url) VALUES (?, ?, ?, ?, ?)",
-                      (name, country, city, description, image_url))
-        conn.commit()
-        
-        # Obtener el ID generado
-        cursor.execute("SELECT @@IDENTITY AS ID")
-        destination_id = cursor.fetchone()[0]
-        conn.close()
-        
-        return func.HttpResponse(json.dumps({"id": destination_id}), status_code=201, mimetype="application/json")
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="destinations/{id}", methods=["PUT"])
-def update_destination(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        id = int(req.route_params.get('id'))
-        logging.info(f"Updating destination with ID: {id}")
-        
-        req_body = req.get_json()
-        name = req_body.get("name")
-        country = req_body.get("country")
-        city = req_body.get("city")
-        description = req_body.get("description")
-        image_url = req_body.get("image_url")
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("UPDATE Destinations SET name = ?, country = ?, city = ?, description = ?, image_url = ? WHERE id = ?",
-                      (name, country, city, description, image_url, id))
-        conn.commit()
-        
-        if cursor.rowcount == 0:
-            conn.close()
-            return func.HttpResponse("Destination not found", status_code=404)
-        
-        conn.close()
-        return func.HttpResponse("Destination updated successfully", status_code=200)
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="destinations/{id}", methods=["DELETE"])
-def delete_destination(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        id = int(req.route_params.get('id'))
-        logging.info(f"Deleting destination with ID: {id}")
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM Destinations WHERE id = ?", (id,))
-        conn.commit()
-        
-        if cursor.rowcount == 0:
-            conn.close()
-            return func.HttpResponse("Destination not found", status_code=404)
-        
-        conn.close()
-        return func.HttpResponse("Destination deleted successfully", status_code=200)
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-###############################################
-# CRUD para la tabla Trips
-###############################################
-
-@app.route(route="trips", methods=["GET"])
-def get_trips(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("Fetching trips from database.")
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM Trips")
-        trips = rows_to_dict_list(cursor, cursor.fetchall())
-        conn.close()
-        return func.HttpResponse(json.dumps(trips, default=str), mimetype="application/json")
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="trips/{id}", methods=["GET"])
-def get_trip_by_id(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        id = int(req.route_params.get('id'))
-        logging.info(f"Fetching trip with ID: {id}")
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM Trips WHERE id = ?", (id,))
-        trip = cursor.fetchone()
-        if trip:
-            trip_dict = dict(zip([column[0] for column in cursor.description], trip))
-            conn.close()
-            return func.HttpResponse(json.dumps(trip_dict, default=str), mimetype="application/json")
-        else:
-            conn.close()
-            return func.HttpResponse("Trip not found", status_code=404)
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="trips", methods=["POST"])
-def create_trip(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("Creating a new trip.")
-    try:
-        req_body = req.get_json()
-        destination_id = req_body.get("destination_id")
-        user_id = req_body.get("user_id")
-        start_date = req_body.get("start_date")
-        end_date = req_body.get("end_date")
-        total_cost = req_body.get("total_cost")
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO Trips (destination_id, user_id, start_date, end_date, total_cost) VALUES (?, ?, ?, ?, ?)",
-                      (destination_id, user_id, start_date, end_date, total_cost))
-        conn.commit()
-        
-        # Obtener el ID generado
-        cursor.execute("SELECT @@IDENTITY AS ID")
-        trip_id = cursor.fetchone()[0]
-        conn.close()
-        
-        return func.HttpResponse(json.dumps({"id": trip_id}), status_code=201, mimetype="application/json")
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="trips/{id}", methods=["PUT"])
-def update_trip(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        id = int(req.route_params.get('id'))
-        logging.info(f"Updating trip with ID: {id}")
-        
-        req_body = req.get_json()
-        destination_id = req_body.get("destination_id")
-        user_id = req_body.get("user_id")
-        start_date = req_body.get("start_date")
-        end_date = req_body.get("end_date")
-        total_cost = req_body.get("total_cost")
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("UPDATE Trips SET destination_id = ?, user_id = ?, start_date = ?, end_date = ?, total_cost = ? WHERE id = ?",
-                      (destination_id, user_id, start_date, end_date, total_cost, id))
-        conn.commit()
-        
-        if cursor.rowcount == 0:
-            conn.close()
-            return func.HttpResponse("Trip not found", status_code=404)
-        
-        conn.close()
-        return func.HttpResponse("Trip updated successfully", status_code=200)
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="trips/{id}", methods=["DELETE"])
-def delete_trip(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        id = int(req.route_params.get('id'))
-        logging.info(f"Deleting trip with ID: {id}")
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM Trips WHERE id = ?", (id,))
-        conn.commit()
-        
-        if cursor.rowcount == 0:
-            conn.close()
-            return func.HttpResponse("Trip not found", status_code=404)
-        
-        conn.close()
-        return func.HttpResponse("Trip deleted successfully", status_code=200)
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-###############################################
-# CRUD para la tabla Bookings
-###############################################
-
-@app.route(route="bookings", methods=["GET"])
-def get_bookings(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("Fetching bookings from database.")
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM Bookings")
-        bookings = rows_to_dict_list(cursor, cursor.fetchall())
-        conn.close()
-        return func.HttpResponse(json.dumps(bookings, default=str), mimetype="application/json")
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="bookings/{id}", methods=["GET"])
-def get_booking_by_id(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        id = int(req.route_params.get('id'))
-        logging.info(f"Fetching booking with ID: {id}")
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM Bookings WHERE id = ?", (id,))
-        booking = cursor.fetchone()
-        if booking:
-            booking_dict = dict(zip([column[0] for column in cursor.description], booking))
-            conn.close()
-            return func.HttpResponse(json.dumps(booking_dict, default=str), mimetype="application/json")
-        else:
-            conn.close()
-            return func.HttpResponse("Booking not found", status_code=404)
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="bookings", methods=["POST"])
-def create_booking(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("Creating a new booking.")
-    try:
-        req_body = req.get_json()
-        user_id = req_body.get("user_id")
-        trip_id = req_body.get("trip_id")
-        status = req_body.get("status")
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO Bookings (user_id, trip_id, status) VALUES (?, ?, ?)",
-                      (user_id, trip_id, status))
-        conn.commit()
-        
-        # Obtener el ID generado
-        cursor.execute("SELECT @@IDENTITY AS ID")
-        booking_id = cursor.fetchone()[0]
-        conn.close()
-        
-        return func.HttpResponse(json.dumps({"id": booking_id}), status_code=201, mimetype="application/json")
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="bookings/{id}", methods=["PUT"])
-def update_booking(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        # Obtener el ID desde los parámetros de ruta
-        id = req.route_params.get('id')
-        booking_id = int(id)
-        logging.info(f"Updating booking with ID: {booking_id}")
-        
-        req_body = req.get_json()
-        user_id = req_body.get("user_id")
-        trip_id = req_body.get("trip_id")
-        status = req_body.get("status")
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("UPDATE Bookings SET user_id = ?, trip_id = ?, status = ? WHERE id = ?",
-                      (user_id, trip_id, status, booking_id))
-        conn.commit()
-        
-        if cursor.rowcount == 0:
-            conn.close()
-            return func.HttpResponse("Booking not found", status_code=404)
-        
-        conn.close()
-        return func.HttpResponse("Booking updated successfully", status_code=200)
-    except ValueError:
-        return func.HttpResponse("Invalid booking ID format", status_code=400)
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="bookings/{id}", methods=["DELETE"])
-def delete_booking(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        id = req.route_params.get('id')
-        booking_id = int(id)
-        logging.info(f"Deleting booking with ID: {booking_id}")
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM Bookings WHERE id = ?", (booking_id,))
-        conn.commit()
-        
-        if cursor.rowcount == 0:
-            conn.close()
-            return func.HttpResponse("Booking not found", status_code=404)
-        
-        conn.close()
-        return func.HttpResponse("Booking deleted successfully", status_code=200)
-    except ValueError:
-        return func.HttpResponse("Invalid booking ID format", status_code=400)
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-
-@app.route(route="payments/{id}", methods=["GET"])
-def get_payment_by_id(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        id = req.route_params.get('id')
-        payment_id = int(id)
-        logging.info(f"Fetching payment with ID: {payment_id}")
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM Payments WHERE id = ?", (payment_id,))
-        payment = cursor.fetchone()
-        if payment:
-            payment_dict = dict(zip([column[0] for column in cursor.description], payment))
-            conn.close()
-            return func.HttpResponse(json.dumps(payment_dict, default=str), mimetype="application/json")
-        else:
-            conn.close()
-            return func.HttpResponse("Payment not found", status_code=404)
-    except ValueError:
-        return func.HttpResponse("Invalid payment ID format", status_code=400)
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-
-@app.route(route="payments/{id}", methods=["PUT"])
-def update_payment(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        id = req.route_params.get('id')
-        payment_id = int(id)
-        logging.info(f"Updating payment with ID: {payment_id}")
-        
-        req_body = req.get_json()
-        user_id = req_body.get("user_id")
-        booking_id = req_body.get("booking_id")
-        amount = req_body.get("amount")
-        payment_method = req_body.get("payment_method")
-        status = req_body.get("status")
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("UPDATE Payments SET user_id = ?, booking_id = ?, amount = ?, payment_method = ?, status = ? WHERE id = ?",
-                      (user_id, booking_id, amount, payment_method, status, payment_id))
-        conn.commit()
-        
-        if cursor.rowcount == 0:
-            conn.close()
-            return func.HttpResponse("Payment not found", status_code=404)
-        
-        conn.close()
-        return func.HttpResponse("Payment updated successfully", status_code=200)
-    except ValueError:
-        return func.HttpResponse("Invalid payment ID format", status_code=400)
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-
-@app.route(route="payments/{id}", methods=["DELETE"])
-def delete_payment(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        id = req.route_params.get('id')
-        payment_id = int(id)
-        logging.info(f"Deleting payment with ID: {payment_id}")
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM Payments WHERE id = ?", (payment_id,))
-        conn.commit()
-        
-        if cursor.rowcount == 0:
-            conn.close()
-            return func.HttpResponse("Payment not found", status_code=404)
-        
-        conn.close()
-        return func.HttpResponse("Payment deleted successfully", status_code=200)
-    except ValueError:
-        return func.HttpResponse("Invalid payment ID format", status_code=400)
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-###############################################
-# CRUD para la tabla Reviews
-###############################################
-
-@app.route(route="reviews", methods=["GET"])
-def get_reviews(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("Fetching reviews from database.")
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM Reviews")
-        reviews = rows_to_dict_list(cursor, cursor.fetchall())
-        conn.close()
-        return func.HttpResponse(json.dumps(reviews, default=str), mimetype="application/json")
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="reviews/{id}", methods=["GET"])
-def get_review_by_id(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        id = req.route_params.get('id')
-        review_id = int(id)
-        logging.info(f"Fetching review with ID: {review_id}")
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM Reviews WHERE id = ?", (review_id,))
-        review = cursor.fetchone()
-        if review:
-            review_dict = dict(zip([column[0] for column in cursor.description], review))
-            conn.close()
-            return func.HttpResponse(json.dumps(review_dict, default=str), mimetype="application/json")
-        else:
-            conn.close()
-            return func.HttpResponse("Review not found", status_code=404)
-    except ValueError:
-        return func.HttpResponse("Invalid review ID format", status_code=400)
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="reviews", methods=["POST"])
-def create_review(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("Creating a new review.")
-    try:
-        req_body = req.get_json()
-        user_id = req_body.get("user_id")
-        destination_id = req_body.get("destination_id")
-        comment = req_body.get("comment")
-        rating = req_body.get("rating")
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO Reviews (user_id, destination_id, comment, rating) VALUES (?, ?, ?, ?)",
-                      (user_id, destination_id, comment, rating))
-        conn.commit()
-        
-        # Obtener el ID generado
-        cursor.execute("SELECT @@IDENTITY AS ID")
-        review_id = cursor.fetchone()[0]
-        conn.close()
-        
-        return func.HttpResponse(json.dumps({"id": review_id}), status_code=201, mimetype="application/json")
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="reviews/{id}", methods=["PUT"])
-def update_review(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        id = req.route_params.get('id')
-        review_id = int(id)
-        logging.info(f"Updating review with ID: {review_id}")
-        
-        req_body = req.get_json()
-        user_id = req_body.get("user_id")
-        destination_id = req_body.get("destination_id")
-        comment = req_body.get("comment")
-        rating = req_body.get("rating")
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("UPDATE Reviews SET user_id = ?, destination_id = ?, comment = ?, rating = ? WHERE id = ?",
-                      (user_id, destination_id, comment, rating, review_id))
-        conn.commit()
-        
-        if cursor.rowcount == 0:
-            conn.close()
-            return func.HttpResponse("Review not found", status_code=404)
-        
-        conn.close()
-        return func.HttpResponse("Review updated successfully", status_code=200)
-    except ValueError:
-        return func.HttpResponse("Invalid review ID format", status_code=400)
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="reviews/{id}", methods=["DELETE"])
-def delete_review(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        id = req.route_params.get('id')
-        review_id = int(id)
-        logging.info(f"Deleting review with ID: {review_id}")
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM Reviews WHERE id = ?", (review_id,))
-        conn.commit()
-        
-        if cursor.rowcount == 0:
-            conn.close()
-            return func.HttpResponse("Review not found", status_code=404)
-        
-        conn.close()
-        return func.HttpResponse("Review deleted successfully", status_code=200)
-    except ValueError:
-        return func.HttpResponse("Invalid review ID format", status_code=400)
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-###############################################
-# Endpoints adicionales para consultas específicas
-###############################################
-
-@app.route(route="users/{user_id}/trips", methods=["GET"])
-def get_trips_by_user(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        user_id = req.route_params.get('user_id')
-        user_id_int = int(user_id)
-        logging.info(f"Fetching trips for user ID: {user_id_int}")
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM Trips WHERE user_id = ?", (user_id_int,))
-        trips = rows_to_dict_list(cursor, cursor.fetchall())
-        conn.close()
-        return func.HttpResponse(json.dumps(trips, default=str), mimetype="application/json")
-    except ValueError:
-        return func.HttpResponse("Invalid user ID format", status_code=400)
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-    
-@app.route(route="destinations/{destination_id}/reviews", methods=["GET"])
-def get_reviews_by_destination(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        destination_id = req.route_params.get('destination_id')
-        destination_id_int = int(destination_id)
-        logging.info(f"Fetching reviews for destination ID: {destination_id_int}")
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM Reviews WHERE destination_id = ?", (destination_id_int,))
-        reviews = rows_to_dict_list(cursor, cursor.fetchall())
-        conn.close()
-        return func.HttpResponse(json.dumps(reviews, default=str), mimetype="application/json")
-    except ValueError:
-        return func.HttpResponse("Invalid destination ID format", status_code=400)
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="users/{user_id}/bookings", methods=["GET"])
-def get_bookings_by_user(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        user_id = req.route_params.get('user_id')
-        user_id_int = int(user_id)
-        logging.info(f"Fetching bookings for user ID: {user_id_int}")
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM Bookings WHERE user_id = ?", (user_id_int,))
-        bookings = rows_to_dict_list(cursor, cursor.fetchall())
-        conn.close()
-        return func.HttpResponse(json.dumps(bookings, default=str), mimetype="application/json")
-    except ValueError:
-        return func.HttpResponse("Invalid user ID format", status_code=400)
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="users/{user_id}/payments", methods=["GET"])
-def get_payments_by_user(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        user_id = req.route_params.get('user_id')
-        user_id_int = int(user_id)
-        logging.info(f"Fetching payments for user ID: {user_id_int}")
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM Payments WHERE user_id = ?", (user_id_int,))
-        payments = rows_to_dict_list(cursor, cursor.fetchall())
-        conn.close()
-        return func.HttpResponse(json.dumps(payments, default=str), mimetype="application/json")
-    except ValueError:
-        return func.HttpResponse("Invalid user ID format", status_code=400)
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="bookings/{booking_id}/payment", methods=["GET"])
-def get_payment_by_booking(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        booking_id = req.route_params.get('booking_id')
-        booking_id_int = int(booking_id)
-        logging.info(f"Fetching payment for booking ID: {booking_id_int}")
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM Payments WHERE booking_id = ?", (booking_id_int,))
-        payment = cursor.fetchone()
-        if payment:
-            payment_dict = dict(zip([column[0] for column in cursor.description], payment))
-            conn.close()
-            return func.HttpResponse(json.dumps(payment_dict, default=str), mimetype="application/json")
-        else:
-            conn.close()
-            return func.HttpResponse("Payment not found for this booking", status_code=404)
-    except ValueError:
-        return func.HttpResponse("Invalid booking ID format", status_code=400)
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-    
-@app.route(route="trips/search", methods=["GET"])
-def search_trips(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("Searching trips with filters")
-    try:
-        # Obtener parámetros de búsqueda
-        params = req.params
-        destination_id = params.get("destination_id")
-        start_date = params.get("start_date")
-        end_date = params.get("end_date")
-        max_cost = params.get("max_cost")
-        
-        # Construir consulta dinámica
-        query = "SELECT * FROM Trips WHERE 1=1"
-        query_params = []
-        
-        if destination_id:
-            query += " AND destination_id = ?"
-            query_params.append(destination_id)
-        
-        if start_date:
-            query += " AND start_date >= ?"
-            query_params.append(start_date)
-        
-        if end_date:
-            query += " AND end_date <= ?"
-            query_params.append(end_date)
-        
-        if max_cost:
-            query += " AND total_cost <= ?"
-            query_params.append(max_cost)
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute(query, query_params)
-        trips = rows_to_dict_list(cursor, cursor.fetchall())
-        conn.close()
-        
-        return func.HttpResponse(json.dumps(trips, default=str), mimetype="application/json")
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="destinations/search", methods=["GET"])
-def search_destinations(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("Searching destinations with filters")
-    try:
-        # Obtener parámetros de búsqueda
-        params = req.params
-        country = params.get("country")
-        city = params.get("city")
-        name_contains = params.get("name")
-        
-        # Construir consulta dinámica
-        query = "SELECT * FROM Destinations WHERE 1=1"
-        query_params = []
-        
-        if country:
-            query += " AND country = ?"
-            query_params.append(country)
-        
-        if city:
-            query += " AND city = ?"
-            query_params.append(city)
-        
-        if name_contains:
-            query += " AND name LIKE ?"
-            query_params.append(f"%{name_contains}%")
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute(query, query_params)
-        destinations = rows_to_dict_list(cursor, cursor.fetchall())
-        conn.close()
-        
-        return func.HttpResponse(json.dumps(destinations, default=str), mimetype="application/json")
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="trips/destination/{destination_id}", methods=["GET"])
-def get_trips_by_destination(req: func.HttpRequest) -> func.HttpResponse:
-    # Obtener el destination_id de la ruta
-    destination_id = int(req.route_params.get('destination_id'))
-    
-    logging.info(f"Fetching trips for destination ID: {destination_id}")
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM Trips WHERE destination_id = ?", (destination_id,))
-        trips = rows_to_dict_list(cursor, cursor.fetchall())
-        conn.close()
-        return func.HttpResponse(json.dumps(trips, default=str), mimetype="application/json")
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="bookings/trip/{trip_id}", methods=["GET"])
-def get_bookings_by_trip(req: func.HttpRequest) -> func.HttpResponse:
-    trip_id = int(req.route_params.get('trip_id'))
-    logging.info(f"Fetching bookings for trip ID: {trip_id}")
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM Bookings WHERE trip_id = ?", (trip_id,))
-        bookings = rows_to_dict_list(cursor, cursor.fetchall())
-        conn.close()
-        return func.HttpResponse(json.dumps(bookings, default=str), mimetype="application/json")
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="trips-with-details", methods=["GET"])
-def get_trips_with_details(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("Fetching trips with destination details")
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        query = """
-        SELECT t.id, t.start_date, t.end_date, t.total_cost,
-               d.name as destination_name, d.country, d.city, d.description,
-               u.name as user_name, u.email
-        FROM Trips t
-        JOIN Destinations d ON t.destination_id = d.id
-        JOIN Users u ON t.user_id = u.id
-        """
-        cursor.execute(query)
-        trips = rows_to_dict_list(cursor, cursor.fetchall())
-        conn.close()
-        return func.HttpResponse(json.dumps(trips, default=str), mimetype="application/json")
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="bookings-with-details", methods=["GET"])
-def get_bookings_with_details(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("Fetching bookings with trip and user details")
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        query = """
-        SELECT b.id, b.status, b.booking_date,
-               u.name as user_name, u.email,
-               t.start_date, t.end_date, t.total_cost,
-               d.name as destination_name, d.country, d.city
-        FROM Bookings b
-        JOIN Users u ON b.user_id = u.id
-        JOIN Trips t ON b.trip_id = t.id
-        JOIN Destinations d ON t.destination_id = d.id
-        """
-        cursor.execute(query)
-        bookings = rows_to_dict_list(cursor, cursor.fetchall())
-        conn.close()
-        return func.HttpResponse(json.dumps(bookings, default=str), mimetype="application/json")
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="reviews-with-details", methods=["GET"])
-def get_reviews_with_details(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("Fetching reviews with user and destination details")
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        query = """
-        SELECT r.id, r.comment, r.rating, r.review_date,
-               u.name as user_name, u.email,
-               d.name as destination_name, d.country, d.city
-        FROM Reviews r
-        JOIN Users u ON r.user_id = u.id
-        JOIN Destinations d ON r.destination_id = d.id
-        """
-        cursor.execute(query)
-        reviews = rows_to_dict_list(cursor, cursor.fetchall())
-        conn.close()
-        return func.HttpResponse(json.dumps(reviews, default=str), mimetype="application/json")
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-@app.route(route="destinations/top-rated", methods=["GET"])
-def get_top_rated_destinations(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("Fetching top rated destinations")
-    try:
-        limit = req.params.get("limit", "5")
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        query = """
-        SELECT d.id, d.name, d.country, d.city, d.description, d.image_url,
-               AVG(r.rating) as average_rating,
-               COUNT(r.id) as review_count
-        FROM Destinations d
-        JOIN Reviews r ON d.id = r.destination_id
-        GROUP BY d.id, d.name, d.country, d.city, d.description, d.image_url
-        ORDER BY average_rating DESC, review_count DESC
-        """
-        if limit.isdigit():
-            query += f" OFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY"
+        elif req.method == "POST":
+            # Obtener datos de la solicitud
+            reserva_data = req.get_json()
             
-        cursor.execute(query)
-        destinations = rows_to_dict_list(cursor, cursor.fetchall())
-        conn.close()
-        return func.HttpResponse(json.dumps(destinations, default=str), mimetype="application/json")
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
+            # Obtener los nombres de columnas del modelo Reserva
+            columnas_validas = [c.name for c in Reserva.__table__.columns]
+            
+            # Filtrar solo los datos válidos
+            datos_filtrados = {
+                key: value for key, value in reserva_data.items() 
+                if key in columnas_validas
+            }
+            
+            # Manejar conversión de fecha si está presente
+            if 'fecha' in datos_filtrados:
+                try:
+                    from datetime import datetime
+                    datos_filtrados['fecha'] = datetime.fromisoformat(datos_filtrados['fecha'])
+                except (ValueError, TypeError):
+                    return func.HttpResponse(
+                        json.dumps({"error": "Formato de fecha inválido"}),
+                        mimetype="application/json",
+                        status_code=400
+                    )
+            
+            # Crear nueva reserva solo con datos válidos
+            nueva_reserva = Reserva(**datos_filtrados)
+            session.add(nueva_reserva)
+            session.commit()
+            
+            return func.HttpResponse(
+                json.dumps(to_dict(nueva_reserva)),
+                mimetype="application/json",
+                status_code=201
+            )
+    
+    except SQLAlchemyError as e:
+        logging.error(f"Error de base de datos: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": "Error de base de datos", "detalle": str(e)}),
+            mimetype="application/json",
+            status_code=500
+        )
+    finally:
+        session.close()
 
-@app.route(route="users/{user_id}/dashboard", methods=["GET"])
-def get_user_dashboard(req: func.HttpRequest) -> func.HttpResponse:
-    user_id = int(req.route_params.get('user_id'))
-    logging.info(f"Fetching dashboard information for user ID: {user_id}")
+@app.route(route="reservas/{reserva_id}", methods=["GET", "PUT", "DELETE"])
+def manage_reserva_by_id(req: func.HttpRequest) -> func.HttpResponse:
     try:
-        conn = get_db()
-        cursor = conn.cursor()
+        session = SessionLocal()
+        reserva_id = int(req.route_params.get('reserva_id'))
+
+        if req.method == "GET":
+            # Obtener reserva por ID
+            reserva = session.query(Reserva).filter(Reserva.id == reserva_id).first()
+            
+            if reserva:
+                return func.HttpResponse(
+                    json.dumps(to_dict(reserva)),
+                    mimetype="application/json"
+                )
+            
+            return func.HttpResponse(
+                json.dumps({"error": "Reserva no encontrada"}),
+                mimetype="application/json",
+                status_code=404
+            )
+
+        elif req.method == "PUT":
+            # Buscar la reserva existente
+            reserva = session.query(Reserva).filter(Reserva.id == reserva_id).first()
+            
+            if not reserva:
+                return func.HttpResponse(
+                    json.dumps({"error": "Reserva no encontrada"}),
+                    mimetype="application/json",
+                    status_code=404
+                )
+
+            # Obtener datos de la solicitud
+            reserva_data = req.get_json()
+            
+            # Obtener columnas válidas
+            columnas_validas = [c.name for c in Reserva.__table__.columns]
+            
+            # Filtrar datos válidos
+            datos_filtrados = {
+                key: value for key, value in reserva_data.items() 
+                if key in columnas_validas
+            }
+            
+            # Manejar conversión de fecha si está presente
+            if 'fecha' in datos_filtrados:
+                try:
+                    from datetime import datetime
+                    datos_filtrados['fecha'] = datetime.fromisoformat(datos_filtrados['fecha'])
+                except (ValueError, TypeError):
+                    return func.HttpResponse(
+                        json.dumps({"error": "Formato de fecha inválido"}),
+                        mimetype="application/json",
+                        status_code=400
+                    )
+            
+            # Actualizar la reserva
+            for key, value in datos_filtrados.items():
+                setattr(reserva, key, value)
+            
+            session.commit()
+            
+            return func.HttpResponse(
+                json.dumps(to_dict(reserva)),
+                mimetype="application/json"
+            )
+
+        elif req.method == "DELETE":
+            # Buscar la reserva
+            reserva = session.query(Reserva).filter(Reserva.id == reserva_id).first()
+            
+            if not reserva:
+                return func.HttpResponse(
+                    json.dumps({"error": "Reserva no encontrada"}),
+                    mimetype="application/json",
+                    status_code=404
+                )
+            
+            # Eliminar la reserva
+            session.delete(reserva)
+            session.commit()
+            
+            return func.HttpResponse(
+                json.dumps({"message": "Reserva eliminada correctamente"}),
+                mimetype="application/json",
+                status_code=200
+            )
+
+    except ValueError:
+        return func.HttpResponse(
+            json.dumps({"error": "ID de reserva inválido"}),
+            mimetype="application/json",
+            status_code=400
+        )
+    
+    except SQLAlchemyError as e:
+        logging.error(f"Error de base de datos: {str(e)}")
+        session.rollback()
+        return func.HttpResponse(
+            json.dumps({"error": "Error de base de datos", "detalle": str(e)}),
+            mimetype="application/json",
+            status_code=500
+        )
+    
+    finally:
+        session.close()
+# Guia Endpoints
+@app.route(route="guias", methods=["GET", "POST"])
+def manage_guias(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        session = SessionLocal()
         
-        # Obtener usuario
-        cursor.execute("SELECT * FROM Users WHERE id = ?", (user_id,))
-        user = cursor.fetchone()
-        if not user:
-            conn.close()
-            return func.HttpResponse("User not found", status_code=404)
+        if req.method == "GET":
+            guias = session.query(Guia).all()
+            return func.HttpResponse(
+                json.dumps([to_dict(guia) for guia in guias], default=str),
+                mimetype="application/json"
+            )
         
-        user_dict = dict(zip([column[0] for column in cursor.description], user))
+        elif req.method == "POST":
+            guia_data = req.get_json()
+
+            # Validar que f_nacimiento esté presente y tenga un valor válido
+            if "f_nacimiento" not in guia_data or not guia_data["f_nacimiento"]:
+                return func.HttpResponse(
+                    json.dumps({"error": "El campo 'f_nacimiento' es obligatorio."}),
+                    mimetype="application/json",
+                    status_code=400
+                )
+
+            # Convertir la fecha a un objeto datetime
+            try:
+                guia_data["f_nacimiento"] = datetime.strptime(guia_data["f_nacimiento"], "%Y-%m-%d")
+            except ValueError:
+                return func.HttpResponse(
+                    json.dumps({"error": "Formato de fecha incorrecto. Usa 'YYYY-MM-DD'."}),
+                    mimetype="application/json",
+                    status_code=400
+                )
+
+            nuevo_guia = Guia(**guia_data)
+            session.add(nuevo_guia)
+            session.commit()
+            return func.HttpResponse(
+                json.dumps(to_dict(nuevo_guia), default=str)
+, 
+                mimetype="application/json", 
+                status_code=201
+            )
+    
+    except SQLAlchemyError as e:
+        logging.error(f"Error de base de datos: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": "Error de base de datos"}), 
+            mimetype="application/json", 
+            status_code=500
+        )
+    finally:
+        session.close()
+
+@app.route(route="guias/{guia_id}", methods=["GET", "PUT", "DELETE"])
+def manage_guia_by_id(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        session = SessionLocal()
+        guia_id = int(req.route_params.get('guia_id'))
         
-        # Obtener viajes del usuario
-        cursor.execute("SELECT * FROM Trips WHERE user_id = ?", (user_id,))
-        trips = rows_to_dict_list(cursor, cursor.fetchall())
+        if req.method == "GET":
+            guia = session.query(Guia).filter(Guia.id == guia_id).first()
+            if guia:
+                return func.HttpResponse(
+                    json.dumps(to_dict(guia), default=str),
+                    mimetype="application/json"
+                )
+            return func.HttpResponse("Guia no encontrado", status_code=404)
         
-        # Obtener reservas del usuario
-        cursor.execute("SELECT * FROM Bookings WHERE user_id = ?", (user_id,))
-        bookings = rows_to_dict_list(cursor, cursor.fetchall())
+        elif req.method == "PUT":
+            guia = session.query(Guia).filter(Guia.id == guia_id).first()
+            if guia:
+                guia_data = req.get_json()
+                for key, value in guia_data.items():
+                    setattr(guia, key, value)
+                session.commit()
+                return func.HttpResponse(
+                    json.dumps(to_dict(guia), default=str), 
+                    mimetype="application/json"
+                )
+            return func.HttpResponse("Guia no encontrado", status_code=404)
         
-        # Obtener pagos del usuario
-        cursor.execute("SELECT * FROM Payments WHERE user_id = ?", (user_id,))
-        payments = rows_to_dict_list(cursor, cursor.fetchall())
+        elif req.method == "DELETE":
+            guia = session.query(Guia).filter(Guia.id == guia_id).first()
+            if guia:
+                session.delete(guia)
+                session.commit()
+                return func.HttpResponse("Guia eliminado", status_code=204)
+            return func.HttpResponse("Guia no encontrado", status_code=404)
+    
+    except SQLAlchemyError as e:
+        logging.error(f"Error de base de datos: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": "Error de base de datos"}), 
+            mimetype="application/json", 
+            status_code=500
+        )
+    finally:
+        session.close()
+
+# Genero Endpoints
+@app.route(route="generos", methods=["GET", "POST"])
+def manage_generos(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        session = SessionLocal()
         
-        # Obtener reseñas del usuario
-        cursor.execute("SELECT * FROM Reviews WHERE user_id = ?", (user_id,))
-        reviews = rows_to_dict_list(cursor, cursor.fetchall())
+        if req.method == "GET":
+            generos = session.query(Genero).all()
+            return func.HttpResponse(
+                json.dumps([to_dict(genero) for genero in generos]),
+                mimetype="application/json"
+            )
         
-        # Construir objeto de dashboard
-        dashboard = {
-            "user": user_dict,
-            "trip_count": len(trips),
-            "booking_count": len(bookings),
-            "payment_amount_total": sum(payment["amount"] for payment in payments),
-            "review_count": len(reviews),
-            "recent_trips": trips[-5:] if trips else [],
-            "recent_bookings": bookings[-5:] if bookings else [],
-            "recent_reviews": reviews[-5:] if reviews else []
-        }
+        elif req.method == "POST":
+            genero_data = req.get_json()
+            nuevo_genero = Genero(**genero_data)
+            session.add(nuevo_genero)
+            session.commit()
+            return func.HttpResponse(
+                json.dumps(to_dict(nuevo_genero)), 
+                mimetype="application/json", 
+                status_code=201
+            )
+    
+    except SQLAlchemyError as e:
+        logging.error(f"Error de base de datos: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": "Error de base de datos"}), 
+            mimetype="application/json", 
+            status_code=500
+        )
+    finally:
+        session.close()
+
+@app.route(route="generos/{genero_id}", methods=["GET", "PUT", "DELETE"])
+def manage_genero_by_id(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        session = SessionLocal()
+        genero_id = int(req.route_params.get('genero_id'))
         
-        conn.close()
-        return func.HttpResponse(json.dumps(dashboard, default=str), mimetype="application/json")
-    except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
+        if req.method == "GET":
+            genero = session.query(Genero).filter(Genero.id == genero_id).first()
+            if genero:
+                return func.HttpResponse(
+                    json.dumps(to_dict(genero)),
+                    mimetype="application/json"
+                )
+            return func.HttpResponse("Genero no encontrado", status_code=404)
+        
+        elif req.method == "PUT":
+            genero = session.query(Genero).filter(Genero.id == genero_id).first()
+            if genero:
+                genero_data = req.get_json()
+                for key, value in genero_data.items():
+                    setattr(genero, key, value)
+                session.commit()
+                return func.HttpResponse(
+                    json.dumps(to_dict(genero)), 
+                    mimetype="application/json"
+                )
+            return func.HttpResponse(
+                json.dumps({"error": "Género no encontrado"}), 
+                mimetype="application/json", 
+                status_code=404
+            )
+        
+        elif req.method == "DELETE":
+            genero = session.query(Genero).filter(Genero.id == genero_id).first()
+            if genero:
+                session.delete(genero)
+                session.commit()
+                return func.HttpResponse(
+                    json.dumps({"message": "Genero eliminado correctamente"}), 
+                    mimetype="application/json", 
+                    status_code=200
+                )
+            return func.HttpResponse(
+                json.dumps({"error": "Genero no encontrado"}), 
+                mimetype="application/json", 
+                status_code=404
+            )
+
+    
+    except SQLAlchemyError as e:
+        logging.error(f"Error de base de datos: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": "Error de base de datos"}), 
+            mimetype="application/json", 
+            status_code=500
+        )
+    finally:
+        session.close()
+
+# Pais Endpoints
+@app.route(route="paises", methods=["GET", "POST"])
+def manage_paises(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        session = SessionLocal()
+        
+        if req.method == "GET":
+            paises = session.query(Pais).all()
+            return func.HttpResponse(
+                json.dumps([to_dict(pais) for pais in paises]),
+                mimetype="application/json"
+            )
+        
+        elif req.method == "POST":
+            pais_data = req.get_json()
+            nuevo_pais = Pais(**pais_data)
+            session.add(nuevo_pais)
+            session.commit()
+            return func.HttpResponse(
+                json.dumps(to_dict(nuevo_pais)), 
+                mimetype="application/json", 
+                status_code=201
+            )
+    
+    except SQLAlchemyError as e:
+        logging.error(f"Error de base de datos: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": "Error de base de datos"}), 
+            mimetype="application/json", 
+            status_code=500
+        )
+    finally:
+        session.close()
+
+@app.route(route="paises/{pais_id}", methods=["GET", "PUT", "DELETE"])
+def manage_pais_by_id(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        session = SessionLocal()
+        pais_id = int(req.route_params.get('pais_id'))
+        
+        if req.method == "GET":
+            pais = session.query(Pais).filter(Pais.id == pais_id).first()
+            if pais:
+                return func.HttpResponse(
+                    json.dumps(to_dict(pais)),
+                    mimetype="application/json"
+                )
+            return func.HttpResponse("Pais no encontrado", status_code=404)
+        
+        elif req.method == "PUT":
+            pais = session.query(Pais).filter(Pais.id == pais_id).first()
+            if pais:
+                pais_data = req.get_json()
+                for key, value in pais_data.items():
+                    setattr(pais, key, value)
+                session.commit()
+                return func.HttpResponse(
+                    json.dumps(to_dict(pais)), 
+                    mimetype="application/json"
+                )
+            return func.HttpResponse("Pais no encontrado", status_code=404)
+        
+        elif req.method == "DELETE":
+            pais = session.query(Pais).filter(Pais.id == pais_id).first()
+            if pais:
+                session.delete(pais)
+                session.commit()
+                return func.HttpResponse("Pais eliminado", status_code=204)
+            return func.HttpResponse("Pais no encontrado", status_code=404)
+    
+    except SQLAlchemyError as e:
+        logging.error(f"Error de base de datos: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": "Error de base de datos"}), 
+            mimetype="application/json", 
+            status_code=500
+        )
+    finally:
+        session.close()
+
+# Ciudad Endpoints
+@app.route(route="ciudades", methods=["GET", "POST"])
+def manage_ciudades(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        session = SessionLocal()
+        
+        if req.method == "GET":
+            ciudades = session.query(Ciudad).all()
+            return func.HttpResponse(
+                json.dumps([to_dict(ciudad) for ciudad in ciudades]),
+                mimetype="application/json"
+            )
+        
+        elif req.method == "POST":
+            try:
+                ciudad_data = req.get_json()
+                
+                # Verificar que el JSON incluye 'pais_id'
+                if "pais_id" not in ciudad_data or not ciudad_data["pais_id"]:
+                    return func.HttpResponse(
+                        json.dumps({"error": "El campo 'pais_id' es obligatorio"}), 
+                        mimetype="application/json", 
+                        status_code=400
+                    )
+
+                # Verificar que el 'pais_id' existe en la base de datos
+                pais_existente = session.query(Pais).filter(Pais.id == ciudad_data["pais_id"]).first()
+                if not pais_existente:
+                    return func.HttpResponse(
+                        json.dumps({"error": "El 'pais_id' proporcionado no existe"}), 
+                        mimetype="application/json", 
+                        status_code=400
+                    )
+
+                # Crear la ciudad con los datos validados
+                nueva_ciudad = Ciudad(**ciudad_data)
+                session.add(nueva_ciudad)
+                session.commit()
+
+                return func.HttpResponse(
+                    json.dumps(to_dict(nueva_ciudad)), 
+                    mimetype="application/json", 
+                    status_code=201
+                )
+
+            except SQLAlchemyError as e:
+                session.rollback()  # Revertir cambios si hay error
+                logging.error(f"Error de base de datos: {str(e)}")
+                return func.HttpResponse(
+                    json.dumps({"error": "Error de base de datos"}), 
+                    mimetype="application/json", 
+                    status_code=500
+                )
+
+    
+    except SQLAlchemyError as e:
+        logging.error(f"Error de base de datos: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": "Error de base de datos"}), 
+            mimetype="application/json", 
+            status_code=500
+        )
+    finally:
+        session.close()
+
+@app.route(route="ciudades/{ciudad_id}", methods=["GET", "PUT", "DELETE"])
+def manage_ciudad_by_id(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        session = SessionLocal()
+        ciudad_id = int(req.route_params.get('ciudad_id'))
+        
+        if req.method == "GET":
+            ciudad = session.query(Ciudad).filter(Ciudad.id == ciudad_id).first()
+            if ciudad:
+                return func.HttpResponse(
+                    json.dumps(to_dict(ciudad)),
+                    mimetype="application/json"
+                )
+            return func.HttpResponse("Ciudad no encontrada", status_code=404)
+        
+        elif req.method == "PUT":
+            ciudad = session.query(Ciudad).filter(Ciudad.id == ciudad_id).first()
+            if ciudad:
+                ciudad_data = req.get_json()
+                for key, value in ciudad_data.items():
+                    setattr(ciudad, key, value)
+                session.commit()
+                return func.HttpResponse(
+                    json.dumps(to_dict(ciudad)), 
+                    mimetype="application/json"
+                )
+            return func.HttpResponse("Ciudad no encontrada", status_code=404)
+        
+        elif req.method == "DELETE":
+            ciudad = session.query(Ciudad).filter(Ciudad.id == ciudad_id).first()
+            if ciudad:
+                session.delete(ciudad)
+                session.commit()
+                return func.HttpResponse("Ciudad eliminada", status_code=204)
+            return func.HttpResponse("Ciudad no encontrada", status_code=404)
+    
+    except SQLAlchemyError as e:
+        logging.error(f"Error de base de datos: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": "Error de base de datos"}), 
+            mimetype="application/json", 
+            status_code=500
+        )
+    finally:
+        session.close()
