@@ -1,9 +1,6 @@
-from sqlalchemy import create_engine, Column, Integer, String
-
-
-from sqlalchemy.ext.declarative import declarative_base
-
-Base = declarative_base()
+from sqlalchemy import Column, Integer, String
+from sqlalchemy.orm import relationship
+from src.models.base import Base
 
 class Usuario(Base):
     __tablename__ = 'usuario'
@@ -11,3 +8,6 @@ class Usuario(Base):
     nombre = Column(String(100), nullable=False)
     usuario = Column(String(100), nullable=False, unique=True)
     contrasena = Column(String(50), nullable=False)
+
+    # Relación inversa
+    reservas = relationship("Reserva", back_populates="usuario")
