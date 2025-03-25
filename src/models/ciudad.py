@@ -5,9 +5,7 @@ from src.models.pais import Pais  # Importación aquí, después de definir Base
 
 class Ciudad(Base):
     __tablename__ = 'ciudad'
-    
-    id = Column(Integer, primary_key=True)
+    id = Column(Integer, primary_key=True, autoincrement=True)
     nombre = Column(String(100), nullable=False)
     pais_id = Column(Integer, ForeignKey('pais.id'), nullable=False)
-
     pais = relationship("Pais", back_populates="ciudades")

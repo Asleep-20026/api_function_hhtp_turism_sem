@@ -1,8 +1,7 @@
-from sqlalchemy import create_engine, Column, Integer, String
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Float
+from sqlalchemy import Column, Integer,ForeignKey
 
-from sqlalchemy.orm import sessionmaker, relationship
+from sqlalchemy.orm import relationship
 Base = declarative_base()
 
 class ReservaUsuario(Base):

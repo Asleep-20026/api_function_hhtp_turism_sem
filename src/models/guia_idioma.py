@@ -7,7 +7,6 @@ Base = declarative_base()
 
 class GuiaIdioma(Base):
     __tablename__ = 'guia_idioma'
-
-    id = Column(Integer, primary_key=True, nullable=False)
-    guia_id = Column(Integer, nullable=False)
-    idioma_id = Column(Integer, nullable=False)
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    guia_id = Column(Integer, ForeignKey('guia.id'), nullable=False)
+    idioma_id = Column(Integer, ForeignKey('idioma.id'), nullable=False)

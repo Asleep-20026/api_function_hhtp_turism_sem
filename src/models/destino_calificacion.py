@@ -8,9 +8,11 @@ Base = declarative_base()
 
 class DestinoCalificacion(Base):
     __tablename__ = 'destino_calificacion'
-    id = Column(Integer, primary_key=True)
-    fecha = Column(DateTime, nullable=True)
-    comentario = Column(String(255), nullable=True)
-    calificacion = Column(Float, nullable=True)
-    usuario_id = Column(Integer, ForeignKey('usuario.id'))
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    reserva_id = Column(Integer, ForeignKey('reserva.id'), nullable=False)
+    fecha = Column(DateTime, nullable=False)
+    comentario = Column(String(500), nullable=False)
+    calificacion = Column(Integer, nullable=False)
+    usuario_id = Column(Integer, ForeignKey('usuario.id'), nullable=False)
     usuario = relationship("Usuario")
+    reserva = relationship("Reserva")
